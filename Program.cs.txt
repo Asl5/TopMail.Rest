@@ -1,0 +1,31 @@
+using Microsoft.AspNetCore.Http.Json;
+using TopMail.Rest.Models;
+using TopMail.Rest.Options;
+using TopMail.Rest.Services;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.Configure<SmtpOptions>(builder.Configuration.GetSection("Smtp"));
+builder.Services.Configure<TrackingOptions>(builder.Configuration.GetSection("Tracking"));
+
+builder.Services.AddSingleton<LogFileWriter>();
+builder.Services.AddSingleton<MailSender>();
+
+builder.Services.Configure<JsonOptions>(options =>
+{
+    options.SerializerOptions.PropertyNamingPolicy = null; // keep exact names
+});
+
+var app = builder.Build();
+
+// Map endpoints equivalent to the ASMX web methods
+app.MapGet("/api/hello", (MailSender svc) => Results.Text(svc.HelloWorld(), "text/plain"));
+
+app.MapPost("/api/mail/send", (MailSender svc, BaseMailRequest req) => Results.Text(svc.InvioMail(req), "text/plain"));
+app.MapPost("/api/mail/send-notracking", (MailSender svc, BaseMailRequest req) => Results.Text(svc.InvioMailNoTracking(req), "text/plain"));
+app.MapPost("/api/mail/send-ccn", (MailSender svc, CcnMailRequest req) => Results.Text(svc.InvioMailConCCN(req), "text/plain"));
+app.MapPost("/api/mail/send-ccn-notracking", (MailSender svc, CcnMailRequest req) => Results.Text(svc.InvioMailConCCNNoTracking(req), "text/plain"));
+app.MapPost("/api/mail/send-with-files", (MailSender svc, MailWithFilesRequest req) => Results.Text(svc.InvioMailWithFiles(req), "text/plain"));
+app.MapPost("/api/mail/send-with-files-ccn", (MailSender svc, MailWithFilesAndCcnRequest req) => Results.Text(svc.InvioMailWithFilesAndCCN(req), "text/plain"));
+
+app.Use(async (ctx, next) => {\n    var feature = ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();\n    if (feature != null) feature.MaxRequestBodySize = 50_000_000;\n    await next();\n});\n\napp.Run();

@@ -1,0 +1,263 @@
+﻿using System.Net;
+using System.Net.Mail;
+using System.Text;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Options;
+using TopMail.Rest.Models;
+using TopMail.Rest.Options;
+
+namespace TopMail.Rest.Services;
+
+public class MailSender
+{
+    private readonly SmtpOptions _smtp;
+    private readonly TrackingOptions _tracking;
+    private readonly LogFileWriter _log;
+
+    public MailSender(IOptions<SmtpOptions> smtp, IOptions<TrackingOptions> tracking, LogFileWriter log)
+    {
+        _smtp = smtp.Value;
+        _tracking = tracking.Value;
+        _log = log;
+    }
+
+    private static bool IsHtml(string? typeBody)
+        => typeBody == "1";
+
+    private static IEnumerable<string> SplitAddresses(string value)
+        => value.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private SmtpClient CreateClient()
+    {
+        var client = new SmtpClient(_smtp.Host, _smtp.Port)
+        {
+            EnableSsl = _smtp.EnableSsl,
+            DeliveryMethod = SmtpDeliveryMethod.Network,
+            UseDefaultCredentials = _smtp.UseDefaultCredentials
+        };
+        if (!_smtp.UseDefaultCredentials && !string.IsNullOrWhiteSpace(_smtp.Username))
+        {
+            client.Credentials = new NetworkCredential(_smtp.Username, _smtp.Password);
+        }
+        return client;
+    }
+
+    private MailMessage BuildMessage(string mittente, string destinatario, string? bcc, string oggetto, string testoMail, bool isHtml)
+    {
+        var fromAddress = string.IsNullOrWhiteSpace(_smtp.DefaultSender) ? mittente : _smtp.DefaultSender!;
+        var message = new MailMessage()
+        {
+            From = new MailAddress(fromAddress),
+            Subject = oggetto,
+            Body = testoMail,
+            IsBodyHtml = isHtml,
+            BodyEncoding = Encoding.UTF8,
+            SubjectEncoding = Encoding.UTF8
+        };
+
+        foreach (var to in SplitAddresses(destinatario))
+            message.To.Add(to);
+
+        if (!string.IsNullOrWhiteSpace(bcc))
+        {
+            foreach (var addr in SplitAddresses(bcc))
+                message.Bcc.Add(addr);
+        }
+
+        return message;
+    }
+
+    private void AddAttachments(MailMessage msg, List<AttachmentDto>? attachments)
+    {
+        if (attachments == null) return;
+        foreach (var a in attachments)
+        {
+            var bytes = Convert.FromBase64String(a.Base64);
+            var stream = new MemoryStream(bytes);
+            var attachment = new Attachment(stream, a.Name);
+            msg.Attachments.Add(attachment);
+        }
+    }
+
+    private void AddAttachments(MailMessage msg, IFormFileCollection files)
+    {
+        if (files == null || files.Count == 0) return;
+        foreach (var f in files)
+        {
+            var ms = new MemoryStream();
+            using var input = f.OpenReadStream();
+            input.CopyTo(ms);
+            ms.Position = 0;
+            var attachment = new Attachment(ms, f.FileName);
+            msg.Attachments.Add(attachment);
+        }
+    }
+
+    public string HelloWorld() => "Hello World";
+
+    public string InvioMail(BaseMailRequest req)
+    {
+        _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "chiamataMetodo", nameof(InvioMail), "", "");
+        string result;
+        try
+        {
+            using var client = CreateClient();
+            using var msg = BuildMessage(req.Mittente, req.Destinatario, _tracking.BccAddress, req.Oggetto, req.TestoMail, IsHtml(req.TypeBody));
+            client.Send(msg);
+            result = "1";
+        }
+        catch (Exception ex)
+        {
+            result = "-1";
+            _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "errore", nameof(InvioMail), ex.Message, ex.StackTrace ?? "");
+        }
+        _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "fineMetodo", nameof(InvioMail), result, "");
+        return result;
+    }
+
+    public string InvioMailNoTracking(BaseMailRequest req)
+    {
+        _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "chiamataMetodo", nameof(InvioMailNoTracking), "", "");
+        string result;
+        try
+        {
+            using var client = CreateClient();
+            using var msg = BuildMessage(req.Mittente, req.Destinatario, null, req.Oggetto, req.TestoMail, IsHtml(req.TypeBody));
+            client.Send(msg);
+            result = "1";
+        }
+        catch (Exception ex)
+        {
+            result = "-1";
+            _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "errore", nameof(InvioMailNoTracking), ex.Message, ex.StackTrace ?? "");
+        }
+        _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "fineMetodo", nameof(InvioMailNoTracking), result, "");
+        return result;
+    }
+
+    public string InvioMailConCCN(CcnMailRequest req)
+    {
+        _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "chiamataMetodo", nameof(InvioMailConCCN), "", "");
+        string result;
+        try
+        {
+            var bcc = string.IsNullOrWhiteSpace(_tracking.BccAddress) ? req.Ccn : _tracking.BccAddress + "," + req.Ccn;
+            using var client = CreateClient();
+            using var msg = BuildMessage(req.Mittente, req.Destinatario, bcc, req.Oggetto, req.TestoMail, IsHtml(req.TypeBody));
+            client.Send(msg);
+            result = "1";
+        }
+        catch (Exception ex)
+        {
+            result = "-1";
+            _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "errore", nameof(InvioMailConCCN), ex.Message, ex.StackTrace ?? "");
+        }
+        _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "fineMetodo", nameof(InvioMailConCCN), result, "");
+        return result;
+    }
+
+    public string InvioMailConCCNNoTracking(CcnMailRequest req)
+    {
+        _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "chiamataMetodo", nameof(InvioMailConCCNNoTracking), "", "");
+        string result;
+        try
+        {
+            using var client = CreateClient();
+            using var msg = BuildMessage(req.Mittente, req.Destinatario, req.Ccn, req.Oggetto, req.TestoMail, IsHtml(req.TypeBody));
+            client.Send(msg);
+            result = "1";
+        }
+        catch (Exception ex)
+        {
+            result = "-1";
+            _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "errore", nameof(InvioMailConCCNNoTracking), ex.Message, ex.StackTrace ?? "");
+        }
+        _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "fineMetodo", nameof(InvioMailConCCNNoTracking), result, "");
+        return result;
+    }
+
+    public string InvioMailWithFiles(MailWithFilesRequest req)
+    {
+        _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "chiamataMetodo", nameof(InvioMailWithFiles), "", "");
+        string result;
+        try
+        {
+            using var client = CreateClient();
+            using var msg = BuildMessage(req.Mittente, req.Destinatario, null, req.Oggetto, req.TestoMail, IsHtml(req.TypeBody));
+            AddAttachments(msg, req.Attachments);
+            client.Send(msg);
+            result = "1";
+        }
+        catch (Exception ex)
+        {
+            result = "-1";
+            _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "errore", nameof(InvioMailWithFiles), ex.Message, ex.StackTrace ?? "");
+        }
+        _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "fineMetodo", nameof(InvioMailWithFiles), result, "");
+        return result;
+    }
+
+    public string InvioMailWithFilesAndCCN(MailWithFilesAndCcnRequest req)
+    {
+        _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "chiamataMetodo", nameof(InvioMailWithFilesAndCCN), "", "");
+        string result;
+        try
+        {
+            using var client = CreateClient();
+            using var msg = BuildMessage(req.Mittente, req.Destinatario, req.Ccn, req.Oggetto, req.TestoMail, IsHtml(req.TypeBody));
+            AddAttachments(msg, req.Attachments);
+            client.Send(msg);
+            result = "1";
+        }
+        catch (Exception ex)
+        {
+            result = "-1";
+            _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "errore", nameof(InvioMailWithFilesAndCCN), ex.Message, ex.StackTrace ?? "");
+        }
+        _log.Write(req.Mittente, req.Destinatario, req.Oggetto, "fineMetodo", nameof(InvioMailWithFilesAndCCN), result, "");
+        return result;
+    }
+
+    // Multipart variants (IFormFileCollection)
+    public string InvioMailWithFilesMultipart(string mittente, string destinatario, string oggetto, string testoMail, string? typeBody, IFormFileCollection files)
+    {
+        _log.Write(mittente, destinatario, oggetto, "chiamataMetodo", nameof(InvioMailWithFilesMultipart), "", "");
+        string result;
+        try
+        {
+            using var client = CreateClient();
+            using var msg = BuildMessage(mittente, destinatario, null, oggetto, testoMail, IsHtml(typeBody));
+            AddAttachments(msg, files);
+            client.Send(msg);
+            result = "1";
+        }
+        catch (Exception ex)
+        {
+            result = "-1";
+            _log.Write(mittente, destinatario, oggetto, "errore", nameof(InvioMailWithFilesMultipart), ex.Message, ex.StackTrace ?? "");
+        }
+        _log.Write(mittente, destinatario, oggetto, "fineMetodo", nameof(InvioMailWithFilesMultipart), result, "");
+        return result;
+    }
+
+    public string InvioMailWithFilesAndCCNMultipart(string mittente, string destinatario, string ccn, string oggetto, string testoMail, string? typeBody, IFormFileCollection files)
+    {
+        _log.Write(mittente, destinatario, oggetto, "chiamataMetodo", nameof(InvioMailWithFilesAndCCNMultipart), "", "");
+        string result;
+        try
+        {
+            using var client = CreateClient();
+            using var msg = BuildMessage(mittente, destinatario, ccn, oggetto, testoMail, IsHtml(typeBody));
+            AddAttachments(msg, files);
+            client.Send(msg);
+            result = "1";
+        }
+        catch (Exception ex)
+        {
+            result = "-1";
+            _log.Write(mittente, destinatario, oggetto, "errore", nameof(InvioMailWithFilesAndCCNMultipart), ex.Message, ex.StackTrace ?? "");
+        }
+        _log.Write(mittente, destinatario, oggetto, "fineMetodo", nameof(InvioMailWithFilesAndCCNMultipart), result, "");
+        return result;
+    }
+}
