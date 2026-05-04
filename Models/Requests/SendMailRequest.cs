@@ -41,7 +41,7 @@ public class SendMailRequest : IValidatableObject
         {
             yield return new ValidationResult(
                 "Almeno un destinatario e' obbligatorio.",
-                new[] { nameof(Destinatario) });
+                [nameof(Destinatario)]);
         }
     }
 }

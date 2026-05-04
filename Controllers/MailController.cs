@@ -1,20 +1,30 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using TopMail.Rest.Models;
 using TopMail.Rest.Models.Requests;
 using TopMail.Rest.Models.Responses;
+using TopMail.Rest.Security;
 using TopMail.Rest.Services;
 
 namespace TopMail.Rest.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize(AuthenticationSchemes = ApiKeyHmacAuthenticationDefaults.SchemeName)]
 public class MailController : ControllerBase
 {
     private readonly IMailService _mailService;
+    private readonly IClientPolicyEvaluator _clientPolicyEvaluator;
+    private readonly ILogger<MailController> _logger;
 
-    public MailController(IMailService mailService)
+    public MailController(
+        IMailService mailService,
+        IClientPolicyEvaluator clientPolicyEvaluator,
+        ILogger<MailController> logger)
     {
         _mailService = mailService;
+        _clientPolicyEvaluator = clientPolicyEvaluator;
+        _logger = logger;
     }
 
     [HttpPost("send")]
@@ -23,7 +33,34 @@ public class MailController : ControllerBase
     [ProducesResponseType(typeof(SendMailResponse), StatusCodes.Status500InternalServerError)]
     public async Task<ActionResult<SendMailResponse>> Send([FromBody] SendMailRequest request, CancellationToken cancellationToken)
     {
+        LogRequestStart("send");
+        _logger.LogInformation(
+            "Mail send request received. ClientId={ClientId}, TypeBody={TypeBody}, ToCount={ToCount}, CcCount={CcCount}, BccCount={BccCount}, BodyLength={BodyLength}.",
+            GetClientId(),
+            request.TypeBody,
+            request.Destinatario.Count,
+            request.Cc.Count,
+            request.Ccn.Count,
+            request.TestoMail?.Length ?? 0);
+
+        if (!_clientPolicyEvaluator.TryValidate(User, request, out var policyError))
+        {
+            _logger.LogWarning(
+                "Mail send request forbidden by client policy. ClientId={ClientId}, Reason={Reason}.",
+                GetClientId(),
+                policyError);
+            return StatusCode(StatusCodes.Status403Forbidden, CreateForbiddenResponse(policyError));
+        }
+
         var result = await _mailService.SendAsync(request, cancellationToken);
+        _logger.LogInformation(
+            "Mail send completed. ClientId={ClientId}, Success={Success}, HttpStatus={HttpStatus}, Code={Code}, FallbackUsed={FallbackUsed}.",
+            GetClientId(),
+            result.Success,
+            result.HttpStatus,
+            result.Code,
+            result.FallbackUsed);
+
         if (result.Success)
         {
             return Ok(result);
@@ -40,7 +77,15 @@ public class MailController : ControllerBase
     [ProducesResponseType(typeof(SendMailResponse), StatusCodes.Status500InternalServerError)]
     public async Task<ActionResult<SendMailResponse>> SendMultipart(CancellationToken cancellationToken)
     {
+        LogRequestStart("send-multipart");
         var form = await Request.ReadFormAsync(cancellationToken);
+        _logger.LogInformation(
+            "Multipart mail request received. ClientId={ClientId}, FileCount={FileCount}, InlineCidCount={InlineCidCount}, TypeBody={TypeBody}, BodyLength={BodyLength}.",
+            GetClientId(),
+            form.Files.Count,
+            ParseInlineCids(form["inlineCids"]).Count,
+            form["typeBody"].ToString(),
+            form["testoMail"].ToString().Length);
 
         var request = new SendMailRequest
         {
@@ -56,11 +101,36 @@ public class MailController : ControllerBase
 
         if (!TryValidateModel(request))
         {
+            _logger.LogWarning(
+                "Multipart mail request model validation failed. ClientId={ClientId}.",
+                GetClientId());
             return ValidationProblem(ModelState);
         }
 
+        if (!_clientPolicyEvaluator.TryValidate(User, request, out var policyError))
+        {
+            _logger.LogWarning(
+                "Multipart mail request forbidden by client policy. ClientId={ClientId}, Reason={Reason}.",
+                GetClientId(),
+                policyError);
+            return StatusCode(StatusCodes.Status403Forbidden, CreateForbiddenResponse(policyError));
+        }
+
         var attachments = await ToAttachmentsAsync(form, cancellationToken);
+        _logger.LogInformation(
+            "Multipart attachments normalized. ClientId={ClientId}, AttachmentCount={AttachmentCount}.",
+            GetClientId(),
+            attachments.Count);
+
         var result = await _mailService.SendAsync(request, attachments, cancellationToken);
+        _logger.LogInformation(
+            "Multipart mail send completed. ClientId={ClientId}, Success={Success}, HttpStatus={HttpStatus}, Code={Code}, FallbackUsed={FallbackUsed}.",
+            GetClientId(),
+            result.Success,
+            result.HttpStatus,
+            result.Code,
+            result.FallbackUsed);
+
         if (result.Success)
         {
             return Ok(result);
@@ -128,5 +198,35 @@ public class MailController : ControllerBase
             .Select(x => x.Trim('<', '>', ' '))
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .ToList();
+    }
+
+    private static SendMailResponse CreateForbiddenResponse(string message)
+    {
+        return new SendMailResponse
+        {
+            HttpStatus = StatusCodes.Status403Forbidden,
+            Success = false,
+            Code = "FORBIDDEN",
+            Message = message,
+            FallbackUsed = false
+        };
+    }
+
+    private string GetClientId()
+    {
+        return User.FindFirst("client_id")?.Value ?? "anonymous";
+    }
+
+    private void LogRequestStart(string operationName)
+    {
+        _logger.LogInformation("================================================================");
+        _logger.LogInformation(
+            "BEGIN MAIL REQUEST {Operation}. TraceId={TraceId}, ClientId={ClientId}, Method={Method}, Path={Path}.",
+            operationName,
+            HttpContext.TraceIdentifier,
+            GetClientId(),
+            HttpContext.Request.Method,
+            HttpContext.Request.Path.Value);
+        _logger.LogInformation("================================================================");
     }
 }

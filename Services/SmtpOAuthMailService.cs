@@ -3,6 +3,7 @@ using MailKit.Security;
 using MailKit;
 using Microsoft.Extensions.Options;
 using MimeKit;
+using System.Text;
 using TopMail.Rest.Models;
 using TopMail.Rest.Models.Requests;
 using TopMail.Rest.Models.Responses;
@@ -42,34 +43,111 @@ public class SmtpOAuthMailService : IMailService
 
     public async Task<SendMailResponse> SendAsync(SendMailRequest request, IReadOnlyCollection<MailAttachment> attachments, CancellationToken cancellationToken)
     {
+        var isHtmlBody = IsHtmlTypeBody(request.TypeBody);
         var requestedFrom = ResolveFromAddress(request.Mittente);
+        _logger.LogInformation(
+            "Mail processing started. RequestedFrom={RequestedFrom}, TypeBody={TypeBody}, IsHtmlBody={IsHtmlBody}, ToCount={ToCount}, CcCount={CcCount}, BccCount={BccCount}, AttachmentCount={AttachmentCount}, BodyLength={BodyLength}.",
+            requestedFrom,
+            request.TypeBody,
+            isHtmlBody,
+            request.Destinatario.Count,
+            request.Cc.Count,
+            request.Ccn.Count,
+            attachments.Count,
+            request.TestoMail?.Length ?? 0);
+
+        if (isHtmlBody && _logger.IsEnabled(LogLevel.Debug))
+        {
+            _logger.LogDebug(
+                "HTML body RAW (incoming, expected Base64 for typeBody=1). Length={RawBodyLength}.{NewLine}{RawBody}",
+                request.TestoMail?.Length ?? 0,
+                Environment.NewLine,
+                request.TestoMail ?? string.Empty);
+        }
+
         if (!IsValidEmailAddress(requestedFrom))
         {
+            _logger.LogWarning("Mail processing rejected: invalid sender address. RequestedFrom={RequestedFrom}.", requestedFrom);
             return CreateClientError($"Mittente non valido: '{requestedFrom}'.", requestedFrom);
         }
+
+        string bodyForFormatting = string.Empty;
 
         try
         {
             var validationError = ValidateConfiguration();
             if (validationError is not null)
             {
+                _logger.LogError("Mail processing failed due to configuration error: {ValidationError}.", validationError);
                 return CreateServerError(validationError, requestedFrom);
             }
 
             var attachmentError = ValidateAttachments(attachments);
             if (attachmentError is not null)
             {
+                _logger.LogWarning("Mail processing rejected by attachment validation. Error={AttachmentError}.", attachmentError);
                 return CreateClientError(attachmentError, requestedFrom);
             }
 
             var recipientSet = BuildRecipients(request);
             if (recipientSet.Error is not null)
             {
+                _logger.LogWarning("Mail processing rejected by recipient validation. Error={RecipientError}.", recipientSet.Error);
                 return CreateClientError(recipientSet.Error, requestedFrom);
             }
 
-            var message = BuildMessage(request, requestedFrom, attachments, recipientSet);
+            if (!TryResolveBodyForFormatting(request, out bodyForFormatting, out var bodyError))
+            {
+                _logger.LogWarning(
+                    "Mail processing rejected by body validation. TypeBody={TypeBody}, IsHtmlBody={IsHtmlBody}, RawBodyLength={RawBodyLength}, Error={BodyError}.",
+                    request.TypeBody,
+                    isHtmlBody,
+                    request.TestoMail?.Length ?? 0,
+                    bodyError);
+                return CreateClientError(bodyError, requestedFrom);
+            }
+
+            if (isHtmlBody)
+            {
+                var decodedBody = System.Net.WebUtility.HtmlDecode(bodyForFormatting);
+                if (!string.Equals(decodedBody, bodyForFormatting, StringComparison.Ordinal))
+                {
+                    _logger.LogInformation(
+                        "HTML body entity-decoded after Base64 conversion. DecodedBodyLength={DecodedBodyLength}.",
+                        decodedBody.Length);
+                }
+
+                bodyForFormatting = decodedBody;
+            }
+
+            _logger.LogInformation(
+                "Body normalized successfully. IsHtmlBody={IsHtmlBody}, NormalizedBodyLength={NormalizedBodyLength}.",
+                isHtmlBody,
+                bodyForFormatting.Length);
+            if (isHtmlBody && _logger.IsEnabled(LogLevel.Debug))
+            {
+                _logger.LogDebug(
+                    "HTML body DECODED (after Base64 decode). Length={DecodedBodyLength}.{NewLine}{DecodedBody}",
+                    bodyForFormatting.Length,
+                    Environment.NewLine,
+                    bodyForFormatting);
+            }
+
+            var message = BuildMessage(request, requestedFrom, attachments, recipientSet, bodyForFormatting);
+            _logger.LogInformation(
+                "Mime message built. SubjectLength={SubjectLength}, HasHtml={HasHtml}, HasText={HasText}, ToCount={ToCount}, CcCount={CcCount}, BccCount={BccCount}, ReplyToCount={ReplyToCount}.",
+                request.Oggetto?.Length ?? 0,
+                message.HtmlBody is not null,
+                message.TextBody is not null,
+                message.To.Count,
+                message.Cc.Count,
+                message.Bcc.Count,
+                message.ReplyTo.Count);
             await SendMessageAsync(message, _smtp.Username, cancellationToken);
+            _logger.LogInformation(
+                "SMTP send completed. EffectiveFrom={EffectiveFrom}, FallbackUsed={FallbackUsed}.",
+                requestedFrom,
+                false);
 
             return new SendMailResponse
             {
@@ -91,8 +169,12 @@ public class SmtpOAuthMailService : IMailService
 
             try
             {
-                var fallbackMessage = BuildMessage(request, _smtp.Username, attachments, recipientSet: null);
+                var fallbackMessage = BuildMessage(request, _smtp.Username, attachments, recipientSet: null, bodyForFormatting);
                 await SendMessageAsync(fallbackMessage, _smtp.Username, cancellationToken);
+                _logger.LogInformation(
+                    "SMTP fallback send completed. RequestedFrom={RequestedFrom}, EffectiveFrom={EffectiveFrom}.",
+                    requestedFrom,
+                    _smtp.Username);
                 return new SendMailResponse
                 {
                     HttpStatus = StatusCodes.Status200OK,
@@ -157,16 +239,30 @@ public class SmtpOAuthMailService : IMailService
 
     private async Task SendMessageAsync(MimeMessage message, string smtpAuthUser, CancellationToken cancellationToken)
     {
+        _logger.LogInformation(
+            "SMTP connection starting. Host={Host}, Port={Port}, SecureSocketOptions={SecureSocketOptions}, AuthUser={AuthUser}.",
+            _smtp.Host,
+            _smtp.Port,
+            ResolveSecureOptions(),
+            smtpAuthUser);
+
         var token = await _tokenProvider.GetAccessTokenAsync(cancellationToken);
+        _logger.LogDebug("SMTP OAuth token acquired successfully.");
 
         using var client = new SmtpClient();
         await client.ConnectAsync(_smtp.Host, _smtp.Port, ResolveSecureOptions(), cancellationToken);
         await client.AuthenticateAsync(new SaslMechanismOAuth2(smtpAuthUser, token), cancellationToken);
         await client.SendAsync(message, cancellationToken);
         await client.DisconnectAsync(true, cancellationToken);
+        _logger.LogInformation("SMTP connection closed cleanly.");
     }
 
-    private MimeMessage BuildMessage(SendMailRequest request, string fromAddress, IReadOnlyCollection<MailAttachment> attachments, RecipientSet? recipientSet)
+    private MimeMessage BuildMessage(
+        SendMailRequest request,
+        string fromAddress,
+        IReadOnlyCollection<MailAttachment> attachments,
+        RecipientSet? recipientSet,
+        string bodyForFormatting)
     {
         var recipients = recipientSet ?? BuildRecipients(request);
         if (recipients.Error is not null)
@@ -185,20 +281,114 @@ public class SmtpOAuthMailService : IMailService
         message.Subject = request.Oggetto;
 
         var bodyBuilder = new BodyBuilder();
-        var body = _mailBodyFormatter.Format(request.TestoMail, request.TypeBody == "1");
+        var isHtmlBody = IsHtmlTypeBody(request.TypeBody);
+        //var body = _mailBodyFormatter.Format(bodyForFormatting, isHtmlBody);
 
-        if (!string.IsNullOrWhiteSpace(body.HtmlBody))
+        if (!string.IsNullOrWhiteSpace(bodyForFormatting))
         {
-            bodyBuilder.HtmlBody = body.HtmlBody;
+            bodyBuilder.HtmlBody = bodyForFormatting;
         }
-        if (!string.IsNullOrWhiteSpace(body.TextBody))
+        if (!string.IsNullOrWhiteSpace(bodyForFormatting))
         {
-            bodyBuilder.TextBody = body.TextBody;
+            bodyBuilder.TextBody = bodyForFormatting;
         }
         AddAttachments(bodyBuilder, attachments);
 
         message.Body = bodyBuilder.ToMessageBody();
         return message;
+    }
+
+    private static bool TryResolveBodyForFormatting(
+        SendMailRequest request,
+        out string bodyForFormatting,
+        out string error)
+    {
+        error = string.Empty;
+        bodyForFormatting = request.TestoMail ?? string.Empty;
+
+        // By contract, HTML bodies must be sent as Base64-encoded UTF-8.
+        if (!IsHtmlTypeBody(request.TypeBody))
+            return true;
+
+        if (!TryDecodeBase64Utf8(bodyForFormatting, out var decodedHtml))
+        {
+            error = "testoMail non valido: per typeBody=1 e' richiesto Base64 UTF-8.";
+            return false;
+        }
+
+        bodyForFormatting = decodedHtml;
+        return true;
+    }
+
+    private static bool TryDecodeBase64Utf8(string input, out string decoded)
+    {
+        decoded = string.Empty;
+        var normalized = NormalizeBase64Input(input);
+        if (string.IsNullOrWhiteSpace(normalized))
+            return false;
+
+        try
+        {
+            var bytes = Convert.FromBase64String(normalized);
+            var utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+            decoded = utf8.GetString(bytes);
+
+            //var bytes2 = Convert.FromBase64String(decoded);
+            //var utf82 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+            //decoded = utf82.GetString(bytes2);
+
+            return true;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+        catch (DecoderFallbackException)
+        {
+            return false;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static string NormalizeBase64Input(string input)
+    {
+        var candidate = (input ?? string.Empty).Trim();
+        if (candidate.Length == 0)
+            return string.Empty;
+
+        // Accept data-uri formats (e.g. data:text/html;base64,....).
+        var markerIndex = candidate.IndexOf("base64,", StringComparison.OrdinalIgnoreCase);
+        if (markerIndex >= 0)
+        {
+            candidate = candidate.Substring(markerIndex + "base64,".Length);
+        }
+
+        // Ignore whitespace and support URL-safe Base64.
+        candidate = string.Concat(candidate.Where(c => !char.IsWhiteSpace(c)));
+        candidate = candidate.Replace('-', '+').Replace('_', '/');
+
+        // Fill missing padding if needed.
+        var mod = candidate.Length % 4;
+        if (mod > 0)
+        {
+            candidate = candidate.PadRight(candidate.Length + (4 - mod), '=');
+        }
+
+        return candidate;
+    }
+
+    private static bool IsHtmlTypeBody(string? typeBody)
+    {
+        if (string.IsNullOrWhiteSpace(typeBody))
+            return false;
+
+        var normalized = typeBody.Trim();
+        return normalized.Equals("1", StringComparison.OrdinalIgnoreCase)
+               || normalized.Equals("true", StringComparison.OrdinalIgnoreCase)
+               || normalized.Equals("html", StringComparison.OrdinalIgnoreCase);
     }
 
     private string ResolveFromAddress(string? requestedSender)
