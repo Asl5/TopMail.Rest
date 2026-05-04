@@ -1,125 +1,217 @@
-# TopMail.Rest (.NET 8, REST)
+# TopMail.Rest
 
-Progetto REST moderno che replica le WebMethod ASMX esistenti in `TopMail.asmx`:
+![.NET](https://img.shields.io/badge/.NET-8-blue)
+![CSharp](https://img.shields.io/badge/C%23-12-239120)
+![API](https://img.shields.io/badge/API-REST-0aa2c0)
+![Security](https://img.shields.io/badge/security-HMAC%20%2B%20RateLimit-success)
+![Mail](https://img.shields.io/badge/mail-SMTP%20OAuth2-6f42c1)
+![Auth](https://img.shields.io/badge/auth-ApiKey%20HMAC-orange)
+![Logging](https://img.shields.io/badge/logging-File%20%2B%20Structured-4c1)
+![Platform](https://img.shields.io/badge/platform-ASP.NET%20Core-5C2D91)
 
-- GET `/api/hello` ? `HelloWorld()` ? ritorna "Hello World" (text/plain)
-- POST `/api/mail/send` ? `InvioMail`
-- POST `/api/mail/send-notracking` ? `InvioMailNoTracking`
-- POST `/api/mail/send-ccn` ? `InvioMailConCCN` (aggiunge anche il tracking BCC da config)
-- POST `/api/mail/send-ccn-notracking` ? `InvioMailConCCNNoTracking`
-- POST `/api/mail/send-with-files` ? `InvioMailWithFiles`
-- POST `/api/mail/send-with-files-ccn` ? `InvioMailWithFilesAndCCN`
+API REST .NET 8 per invio email via SMTP OAuth2 (Microsoft 365), con autenticazione HMAC, policy per client, rate limiting e logging su file.
 
-Tutti gli endpoint restituiscono `"1"` su successo e `"-1"` su errore (content-type `text/plain`).
+## Panoramica
 
-## Payload JSON
+Funzionalita principali:
 
-Esempi minimi:
+- invio email JSON e multipart/form-data
+- autenticazione custom ApiKey + HMAC SHA256
+- protezione anti-replay (timestamp + nonce)
+- rate limiting per client autenticato
+- validazione policy mittenti/destinatari per client
+- supporto allegati e immagini inline (multipart)
+- fallback mittente in caso di SendAsDenied
+- logging applicativo strutturato su file configurabile
 
-```json
-POST /api/mail/send
-{
-  "mittente": "noreply@example.com",
-  "destinatario": "user@example.com",
-  "oggetto": "Oggetto",
-  "testoMail": "Testo",
-  "typeBody": "1" // 1 = HTML, 0/empty = testo
-}
+## Endpoint
+
+Base route: `api/mail`
+
+- `POST /api/mail/send`
+- `POST /api/mail/send-multipart`
+
+Nota: gli endpoint richiedono autenticazione HMAC (`401` se header mancanti/non validi).
+
+## Sicurezza
+
+Schema di autenticazione: `ApiKeyHmac`
+
+Header richiesti:
+
+- `X-Client-Id`
+- `X-Api-Key`
+- `X-Timestamp` (UTC ISO-8601)
+- `X-Nonce`
+- `X-Signature` (Base64 HMAC-SHA256)
+
+Canonical string usata per la firma:
+
+```text
+{METHOD_UPPER}
+{PATH_AND_QUERY}
+{BASE64_SHA256_BODY}
+{TIMESTAMP_HEADER}
+{NONCE_HEADER}
+{CLIENT_ID}
 ```
 
+Controlli aggiuntivi:
+
+- finestra temporale (`AllowedClockSkewSeconds`)
+- anti-replay nonce (`NonceTtlSeconds`)
+- rate limit globale client autenticati: `MaxRequestsPerMinute` per client
+- rate limit richieste anonime/non autenticate: limite ridotto per IP
+
+## Payload
+
+### JSON (`POST /api/mail/send`)
+
 ```json
-POST /api/mail/send-ccn
 {
   "mittente": "noreply@example.com",
-  "destinatario": "user@example.com",
-  "ccn": "audit@example.com",
+  "destinatario": ["user@example.com"],
+  "cc": [],
+  "ccn": [],
+  "replyTo": "",
   "oggetto": "Oggetto",
-  "testoMail": "<b>HTML</b>",
+  "testoMail": "PGh0bWw+PGJvZHk+Q2lhbyE8L2JvZHk+PC9odG1sPg==",
   "typeBody": "1"
 }
 ```
 
+### Multipart (`POST /api/mail/send-multipart`)
+
+Campi form supportati:
+
+- `mittente`
+- `destinatario` (lista separata da `,` o `;`)
+- `cc`
+- `ccn`
+- `replyTo`
+- `oggetto`
+- `testoMail`
+- `typeBody`
+- `files` (allegati)
+- `inlineFiles` (immagini inline)
+- `inlineCids` (CID separati da `,` o `;`)
+
+## Gestione body HTML (`typeBody`)
+
+Quando `typeBody` e `1` (o `true`/`html`):
+
+1. `testoMail` deve essere Base64 UTF-8
+2. il backend decodifica Base64
+3. applica `HtmlDecode` (entita come `&lt;`, `&gt;`, `&amp;`)
+4. opzionalmente sanitizza/wrappa HTML in base a configurazione `MailBody`
+
+Se `typeBody` non e HTML, il body e trattato come testo semplice.
+
+## Codici risposta
+
+- `200` invio riuscito
+- `400` errore validazione input/body/allegati
+- `401` autenticazione HMAC fallita
+- `403` policy client non autorizza la richiesta
+- `429` rate limit superato
+- `500` errore interno/configurazione/SMTP
+
+## Configurazione (`appsettings*.json`)
+
+Sezioni principali:
+
+- `Smtp`
+- `AzureAd`
+- `Tracking`
+- `MailBody`
+- `AttachmentSecurity`
+- `AuthorizedClients`
+- `Logging`
+- `FileLogging`
+
+Esempio sintetico:
+
 ```json
-POST /api/mail/send-with-files
 {
-  "mittente": "noreply@example.com",
-  "destinatario": "user@example.com",
-  "oggetto": "Allegati",
-  "testoMail": "Ciao",
-  "typeBody": "0",
-  "attachments": [
-    { "name": "prova.txt", "base64": "SGVsbG8gV29ybGQh" }
-  ]
+  "Smtp": {
+    "Host": "smtp.office365.com",
+    "Port": 587,
+    "EnableSsl": true,
+    "Username": "mailbox@domain.tld"
+  },
+  "AzureAd": {
+    "TenantId": "...",
+    "ClientId": "...",
+    "ClientSecret": "..."
+  },
+  "AuthorizedClients": {
+    "AllowedClockSkewSeconds": 300,
+    "NonceTtlSeconds": 300,
+    "Clients": [
+      {
+        "ClientId": "client-1",
+        "ApiKey": "...",
+        "HmacSecret": "...",
+        "Enabled": true,
+        "MaxRequestsPerMinute": 60,
+        "AllowedFromAddresses": [],
+        "AllowedRecipientDomains": []
+      }
+    ]
+  },
+  "FileLogging": {
+    "Enabled": true,
+    "DirectoryPath": "c:/temp/topmail-logs",
+    "FileNamePrefix": "topmail",
+    "FileNameDateFormat": "yyyyMMdd",
+    "MinimumLevel": "Information"
+  }
 }
 ```
 
-> Nota: `InvioMailConCCN` aggiunge sempre anche il BCC di tracking configurato (come l'ASMX originario).
+## Logging
 
-## Configurazione SMTP
+Il progetto usa `ILogger` + provider custom su file.
 
-Modifica `TopMail.Rest/appsettings.json`:
+- output su file giornaliero nella directory `FileLogging:DirectoryPath`
+- log di pipeline su controller + servizio SMTP
+- separatore esplicito a inizio richiesta (`BEGIN MAIL REQUEST`)
+- log body HTML raw/decoded disponibili solo a livello `Debug`
 
-- `Smtp:Host` (es. `smtp.server.local`)
-- `Smtp:Port` (es. `587`)
-- `Smtp:EnableSsl` (`true/false`)
-- `Smtp:Username` / `Smtp:Password` (se richieste credenziali)
-- `Smtp:UseDefaultCredentials` (`true` se usi credenziali di macchina)
-- `Smtp:DefaultSender` (opzionale; se il server non consente mittenti arbitrari)
-- `Tracking:BccAddress` (default: `traccia-pl-lp@asl5.liguria.it`)
-- `logFile`: `TUTTO` | `ERRORI` | `NIENTE`
+Per abilitare debug completo (anche body):
 
-Il logging replica il formato dell\'ASMX e scrive su `c:/temp/{0}_topmail.log` come nel codice originale.
+```json
+{
+  "Logging": {
+    "LogLevel": {
+      "TopMail.Rest": "Debug"
+    }
+  },
+  "FileLogging": {
+    "MinimumLevel": "Debug"
+  }
+}
+```
 
 ## Avvio locale
 
-Richiede .NET SDK 8.0:
+Richiede .NET SDK 8.0+
 
-```
-cd TopMail.Rest
- dotnet run
-```
-
-Poi chiama gli endpoint:
-
-```
-curl http://localhost:5180/api/hello
+```bash
+dotnet restore
+dotnet build
+dotnet run
 ```
 
-## Note di compatibilità
+## Dipendenze principali
 
-- Questa implementazione non dipende dalla vecchia `Common.dll` (non compatibile con .NET 8). L\'invio usa `System.Net.Mail`.
-- `maxRequestLength` dell\'ASMX (~50 MB) può essere riprodotto regolando la dimensione massima della richiesta a livello di reverse proxy/Kestrel se necessario.
-- Se vuoi mantenere esattamente lo stesso nome file di log (con `{0}` letterale), è già così; possiamo cambiarlo per includere la data su richiesta.
-### Multipart (form-data)
+- `MailKit`
+- `Microsoft.Identity.Client`
+- `HtmlSanitizer`
 
-- POST `/api/mail/send-with-files-multipart`
-- POST `/api/mail/send-with-files-ccn-multipart`
+## Note operative
 
-Esempio con `curl` (Windows PowerShell):
-
-```
-curl -X POST http://localhost:5180/api/mail/send-with-files-multipart ^
-  -H "Content-Type: multipart/form-data" ^
-  -F mittente=noreply@example.com ^
-  -F destinatario=user@example.com ^
-  -F oggetto=Allegati ^
-  -F testoMail=Ciao ^
-  -F typeBody=0 ^
-  -F files=@C:\\path\\to\\prova.txt
-```
-
-Con CCN:
-
-```
-curl -X POST http://localhost:5180/api/mail/send-with-files-ccn-multipart ^
-  -H "Content-Type: multipart/form-data" ^
-  -F mittente=noreply@example.com ^
-  -F destinatario=user@example.com ^
-  -F ccn=audit@example.com ^
-  -F oggetto=Allegati ^
-  -F testoMail=Ciao ^
-  -F typeBody=1 ^
-  -F files=@C:\\path\\to\\prova.txt
-```
-
-> Nota: più allegati sono supportati ripetendo `-F files=@...`.
+- il mittente effettivo puo andare in fallback su `Smtp:Username` in caso di errore `SendAsDenied`
+- `Tracking:BccAddress` viene aggiunto automaticamente se configurato e valido
+- gli indirizzi destinatari sono normalizzati e deduplicati tra To/Cc/Bcc
+- limiti allegati applicati da `AttachmentSecurity` (count, size, estensioni)
