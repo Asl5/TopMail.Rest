@@ -8,6 +8,15 @@ using TopMail.Rest.Services;
 
 namespace TopMail.Rest.Controllers;
 
+/// <summary>
+/// Endpoint per l'invio di email tramite SMTP OAuth2.
+/// </summary>
+/// <remarks>
+/// Tutte le operazioni richiedono autenticazione HMAC tramite header applicativi.
+/// <para>
+/// Header richiesti: <c>X-Client-Id</c>, <c>X-Api-Key</c>, <c>X-Timestamp</c>, <c>X-Nonce</c>, <c>X-Signature</c>.
+/// </para>
+/// </remarks>
 [ApiController]
 [Route("api/[controller]")]
 [Authorize(AuthenticationSchemes = ApiKeyHmacAuthenticationDefaults.SchemeName)]
@@ -27,9 +36,24 @@ public class MailController : ControllerBase
         _logger = logger;
     }
 
+    /// <summary>
+    /// Invia una email con payload JSON.
+    /// </summary>
+    /// <remarks>
+    /// Se <c>typeBody</c> e' impostato a <c>1</c>/<c>true</c>/<c>html</c>, il campo <c>testoMail</c> deve contenere HTML Base64 UTF-8.
+    /// <para>
+    /// La pipeline server applica validazione policy client, controllo destinatari e limiti allegati inline/standard.
+    /// </para>
+    /// </remarks>
+    /// <param name="request">Dati del messaggio da inviare.</param>
+    /// <param name="cancellationToken">Token di cancellazione richiesta.</param>
+    /// <returns>Esito invio email.</returns>
     [HttpPost("send")]
     [ProducesResponseType(typeof(SendMailResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(SendMailResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(SendMailResponse), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(SendMailResponse), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(SendMailResponse), StatusCodes.Status429TooManyRequests)]
     [ProducesResponseType(typeof(SendMailResponse), StatusCodes.Status500InternalServerError)]
     public async Task<ActionResult<SendMailResponse>> Send([FromBody] SendMailRequest request, CancellationToken cancellationToken)
     {
@@ -69,11 +93,25 @@ public class MailController : ControllerBase
         return StatusCode(result.HttpStatus, result);
     }
 
+    /// <summary>
+    /// Invia una email con payload multipart/form-data e allegati opzionali.
+    /// </summary>
+    /// <remarks>
+    /// Campi form supportati: <c>mittente</c>, <c>destinatario</c>, <c>cc</c>, <c>ccn</c>, <c>replyTo</c>, <c>oggetto</c>, <c>testoMail</c>, <c>typeBody</c>.
+    /// <para>
+    /// File supportati: <c>files</c> (allegati standard), <c>inlineFiles</c> (immagini inline), <c>inlineCids</c> (lista CID opzionale).
+    /// </para>
+    /// </remarks>
+    /// <param name="cancellationToken">Token di cancellazione richiesta.</param>
+    /// <returns>Esito invio email.</returns>
     [HttpPost("send-multipart")]
     [Consumes("multipart/form-data")]
     [RequestFormLimits(MultipartBodyLengthLimit = 20_000_000)]
     [ProducesResponseType(typeof(SendMailResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(SendMailResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(SendMailResponse), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(SendMailResponse), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(SendMailResponse), StatusCodes.Status429TooManyRequests)]
     [ProducesResponseType(typeof(SendMailResponse), StatusCodes.Status500InternalServerError)]
     public async Task<ActionResult<SendMailResponse>> SendMultipart(CancellationToken cancellationToken)
     {

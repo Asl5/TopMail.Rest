@@ -8,6 +8,7 @@ using TopMail.Rest.Models;
 using TopMail.Rest.Models.Requests;
 using TopMail.Rest.Models.Responses;
 using TopMail.Rest.Options;
+using System.Text.RegularExpressions;
 
 namespace TopMail.Rest.Services;
 
@@ -109,7 +110,7 @@ public class SmtpOAuthMailService : IMailService
 
             if (isHtmlBody)
             {
-                var decodedBody = System.Net.WebUtility.HtmlDecode(bodyForFormatting);
+                var decodedBody = DecodeHtmlPayload(bodyForFormatting);
                 if (!string.Equals(decodedBody, bodyForFormatting, StringComparison.Ordinal))
                 {
                     _logger.LogInformation(
@@ -283,15 +284,10 @@ public class SmtpOAuthMailService : IMailService
         var bodyBuilder = new BodyBuilder();
         var isHtmlBody = IsHtmlTypeBody(request.TypeBody);
         //var body = _mailBodyFormatter.Format(bodyForFormatting, isHtmlBody);
-
         if (!string.IsNullOrWhiteSpace(bodyForFormatting))
-        {
             bodyBuilder.HtmlBody = bodyForFormatting;
-        }
         if (!string.IsNullOrWhiteSpace(bodyForFormatting))
-        {
             bodyBuilder.TextBody = bodyForFormatting;
-        }
         AddAttachments(bodyBuilder, attachments);
 
         message.Body = bodyBuilder.ToMessageBody();
@@ -378,6 +374,39 @@ public class SmtpOAuthMailService : IMailService
         }
 
         return candidate;
+    }
+
+    private static string DecodeHtmlPayload(string payload)
+    {
+        if (string.IsNullOrWhiteSpace(payload))
+            return string.Empty;
+
+        var candidate = payload;
+
+        // Some legacy producers inject raw <br> between escaped html lines.
+        // Convert those separators back to new lines before HtmlDecode.
+        if (LooksLikeEscapedHtml(candidate))
+        {
+            candidate = Regex.Replace(candidate, @"<br\s*/?>", "\n", RegexOptions.IgnoreCase);
+        }
+
+        var decoded = candidate;
+        for (var i = 0; i < 3; i++)
+        {
+            var next = System.Net.WebUtility.HtmlDecode(decoded);
+            if (string.Equals(next, decoded, StringComparison.Ordinal))
+                break;
+
+            decoded = next;
+        }
+
+        return decoded;
+    }
+
+    private static bool LooksLikeEscapedHtml(string value)
+    {
+        return value.Contains("&lt;", StringComparison.OrdinalIgnoreCase)
+               && value.Contains("&gt;", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsHtmlTypeBody(string? typeBody)

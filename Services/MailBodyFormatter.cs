@@ -30,7 +30,7 @@ public class MailBodyFormatter : IMailBodyFormatter
         }
 
         var html = _options.SanitizeHtml ? _sanitizer.Sanitize(content) : content;
-        if (_options.WrapHtmlDocument)
+        if (_options.WrapHtmlDocument && !LooksLikeHtmlDocument(html))
         {
             html = WrapHtml(html);
         }
@@ -95,5 +95,15 @@ public class MailBodyFormatter : IMailBodyFormatter
         var withoutTags = Regex.Replace(html, "<[^>]*>", " ");
         var decoded = System.Net.WebUtility.HtmlDecode(withoutTags);
         return Regex.Replace(decoded, @"\s+", " ").Trim();
+    }
+
+    private static bool LooksLikeHtmlDocument(string html)
+    {
+        if (string.IsNullOrWhiteSpace(html))
+            return false;
+
+        var trimmed = html.TrimStart();
+        return trimmed.StartsWith("<!doctype", StringComparison.OrdinalIgnoreCase)
+               || trimmed.StartsWith("<html", StringComparison.OrdinalIgnoreCase);
     }
 }

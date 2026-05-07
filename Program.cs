@@ -1,10 +1,12 @@
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
+using System.Reflection;
 using System.Threading.RateLimiting;
 using TopMail.Rest.Options;
 using TopMail.Rest.Security;
 using TopMail.Rest.Services;
+using TopMail.Rest.Swagger;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -81,8 +83,34 @@ builder.Services.AddControllers().AddJsonOptions(options =>
 {
     options.JsonSerializerOptions.PropertyNamingPolicy = null;
 });
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo
+    {
+        Title = "TopMail.Rest",
+        Version = "v1",
+        Description = "API per invio email SMTP OAuth2 con autenticazione HMAC."
+    });
+
+    var xmlFile = $"{Assembly.GetExecutingAssembly().GetName().Name}.xml";
+    var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+    if (File.Exists(xmlPath))
+    {
+        options.IncludeXmlComments(xmlPath);
+    }
+
+    options.OperationFilter<SendMultipartRequestBodyOperationFilter>();
+});
 
 var app = builder.Build();
+
+app.UseSwagger();
+app.UseSwaggerUI(options =>
+{
+    options.RoutePrefix = string.Empty;
+    options.SwaggerEndpoint("/swagger/v1/swagger.json", "TopMail.Rest v1");
+});
 
 app.UseAuthentication();
 app.UseRateLimiter();
