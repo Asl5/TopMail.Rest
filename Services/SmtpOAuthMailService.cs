@@ -47,10 +47,11 @@ public class SmtpOAuthMailService : IMailService
         var isHtmlBody = IsHtmlTypeBody(request.TypeBody);
         var requestedFrom = ResolveFromAddress(request.Mittente);
         _logger.LogInformation(
-            "Mail processing started. RequestedFrom={RequestedFrom}, TypeBody={TypeBody}, IsHtmlBody={IsHtmlBody}, ToCount={ToCount}, CcCount={CcCount}, BccCount={BccCount}, AttachmentCount={AttachmentCount}, BodyLength={BodyLength}.",
+            "Mail processing started. RequestedFrom={RequestedFrom}, TypeBody={TypeBody}, IsHtmlBody={IsHtmlBody},Destinatario={Destinatario} ToCount={ToCount}, CcCount={CcCount}, BccCount={BccCount}, AttachmentCount={AttachmentCount}, BodyLength={BodyLength}.",
             requestedFrom,
             request.TypeBody,
             isHtmlBody,
+            request.Destinatario,
             request.Destinatario.Count,
             request.Cc.Count,
             request.Ccn.Count,
@@ -139,7 +140,7 @@ public class SmtpOAuthMailService : IMailService
                 "Mime message built. SubjectLength={SubjectLength}, HasHtml={HasHtml}, HasText={HasText}, ToCount={ToCount}, CcCount={CcCount}, BccCount={BccCount}, ReplyToCount={ReplyToCount}.",
                 request.Oggetto?.Length ?? 0,
                 message.HtmlBody is not null,
-                message.TextBody is not null,
+                message.TextBody is not null ? message.TextBody : false,
                 message.To.Count,
                 message.Cc.Count,
                 message.Bcc.Count,
