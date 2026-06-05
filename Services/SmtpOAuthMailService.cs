@@ -17,6 +17,7 @@ public class SmtpOAuthMailService : IMailService
     private readonly SmtpOptions _smtp;
     private readonly TrackingOptions _tracking;
     private readonly AttachmentSecurityOptions _attachmentSecurity;
+    private readonly PlainTextRecipientOptions _plainTextRecipients;
     private readonly AzureAdTokenProvider _tokenProvider;
     private readonly IMailBodyFormatter _mailBodyFormatter;
     private readonly ILogger<SmtpOAuthMailService> _logger;
@@ -25,6 +26,7 @@ public class SmtpOAuthMailService : IMailService
         IOptions<SmtpOptions> smtpOptions,
         IOptions<TrackingOptions> trackingOptions,
         IOptions<AttachmentSecurityOptions> attachmentSecurityOptions,
+        IOptions<PlainTextRecipientOptions> plainTextRecipientOptions,
         AzureAdTokenProvider tokenProvider,
         IMailBodyFormatter mailBodyFormatter,
         ILogger<SmtpOAuthMailService> logger)
@@ -32,6 +34,7 @@ public class SmtpOAuthMailService : IMailService
         _smtp = smtpOptions.Value;
         _tracking = trackingOptions.Value;
         _attachmentSecurity = attachmentSecurityOptions.Value;
+        _plainTextRecipients = plainTextRecipientOptions.Value;
         _tokenProvider = tokenProvider;
         _mailBodyFormatter = mailBodyFormatter;
         _logger = logger;
@@ -285,10 +288,19 @@ public class SmtpOAuthMailService : IMailService
         var bodyBuilder = new BodyBuilder();
         var isHtmlBody = IsHtmlTypeBody(request.TypeBody);
         //var body = _mailBodyFormatter.Format(bodyForFormatting, isHtmlBody);
-        if (!string.IsNullOrWhiteSpace(bodyForFormatting))
-            bodyBuilder.HtmlBody = bodyForFormatting;
-        if (!string.IsNullOrWhiteSpace(bodyForFormatting))
-            bodyBuilder.TextBody = bodyForFormatting;
+        var forcePlainText = isHtmlBody && ShouldForcePlainText(recipients);
+        if (forcePlainText)
+        {
+            bodyBuilder.TextBody = ConvertHtmlToFormattedText(bodyForFormatting);
+            _logger.LogInformation("HTML body converted to plain text for configured recipient.");
+        }
+        else
+        {
+            if (!string.IsNullOrWhiteSpace(bodyForFormatting))
+                bodyBuilder.HtmlBody = bodyForFormatting;
+            if (!string.IsNullOrWhiteSpace(bodyForFormatting))
+                bodyBuilder.TextBody = bodyForFormatting;
+        }
         AddAttachments(bodyBuilder, attachments);
 
         message.Body = bodyBuilder.ToMessageBody();
@@ -408,6 +420,63 @@ public class SmtpOAuthMailService : IMailService
     {
         return value.Contains("&lt;", StringComparison.OrdinalIgnoreCase)
                && value.Contains("&gt;", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool ShouldForcePlainText(RecipientSet recipients)
+    {
+        if (!_plainTextRecipients.Enabled)
+            return false;
+
+        var allRecipients = recipients.To
+            .Concat(recipients.Cc)
+            .Concat(recipients.Bcc);
+
+        foreach (var recipient in allRecipients)
+        {
+            if (MatchesPlainTextRecipient(recipient))
+                return true;
+        }
+
+        return false;
+    }
+
+    private bool MatchesPlainTextRecipient(string recipient)
+    {
+        if (!System.Net.Mail.MailAddress.TryCreate(recipient, out var parsed))
+            return false;
+
+        var address = parsed.Address.Trim();
+        var domain = address.Split('@').LastOrDefault() ?? string.Empty;
+
+        return _plainTextRecipients.Addresses.Any(x => address.Equals(x.Trim(), StringComparison.OrdinalIgnoreCase))
+               || _plainTextRecipients.Domains.Any(x => domain.Equals(NormalizeDomain(x), StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string ConvertHtmlToFormattedText(string html)
+    {
+        if (string.IsNullOrWhiteSpace(html))
+            return string.Empty;
+
+        var text = html;
+        text = Regex.Replace(text, @"<\s*(script|style)[^>]*>.*?<\s*/\s*\1\s*>", string.Empty, RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        text = Regex.Replace(text, @"<\s*br\s*/?\s*>", "\n", RegexOptions.IgnoreCase);
+        text = Regex.Replace(text, @"<\s*/\s*(p|div|h[1-6]|tr|table)\s*>", "\n", RegexOptions.IgnoreCase);
+        text = Regex.Replace(text, @"<\s*li[^>]*>", "\n- ", RegexOptions.IgnoreCase);
+        text = Regex.Replace(text, @"<\s*/\s*(td|th)\s*>", "\t", RegexOptions.IgnoreCase);
+        text = Regex.Replace(text, @"<[^>]+>", string.Empty);
+        text = System.Net.WebUtility.HtmlDecode(text);
+        text = text.Replace('\u00A0', ' ');
+        text = Regex.Replace(text, @"[ \t]+\n", "\n");
+        text = Regex.Replace(text, @"\n[ \t]+", "\n");
+        text = Regex.Replace(text, @"[ \t]{2,}", " ");
+        text = Regex.Replace(text, @"\n{3,}", "\n\n");
+
+        return text.Trim();
+    }
+
+    private static string NormalizeDomain(string domain)
+    {
+        return domain.Trim().TrimStart('@').ToLowerInvariant();
     }
 
     private static bool IsHtmlTypeBody(string? typeBody)

@@ -17,6 +17,7 @@ builder.Services.Configure<MailBodyOptions>(builder.Configuration.GetSection("Ma
 builder.Services.Configure<AttachmentSecurityOptions>(builder.Configuration.GetSection("AttachmentSecurity"));
 builder.Services.Configure<AuthorizedClientsOptions>(builder.Configuration.GetSection("AuthorizedClients"));
 builder.Services.Configure<FileLoggingOptions>(builder.Configuration.GetSection(FileLoggingOptions.SectionName));
+builder.Services.Configure<PlainTextRecipientOptions>(builder.Configuration.GetSection(PlainTextRecipientOptions.SectionName));
 builder.Services.AddSingleton<IValidateOptions<AuthorizedClientsOptions>, AuthorizedClientsOptionsValidator>();
 
 var fileLoggingOptions = builder.Configuration
